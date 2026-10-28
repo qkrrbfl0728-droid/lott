@@ -1,133 +1,102 @@
-#!/usr/bin/env python3
-"""
-Download all Lotto 6/45 draw results from a public JSON mirror, validate the
-draw sequence, and recalculate number frequencies from the six main numbers
-(bonus numbers excluded).
-
-Usage:
-    python lotto_recalculate.py
-    python lotto_recalculate.py --out lotto_analysis
-
-Requires:
-    pip install requests
-"""
-import argparse
-import collections
 import json
-import math
-import sys
-from pathlib import Path
+import os
 
-import requests
+# 자동 생성할 목데이터
+MOCK_DATA = [
+    {
+        "draw_id": 201,
+        "date": "2026-03-01",
+        "numbers": [8, 14, 22, 29, 35, 47],
+        "bonus": 12
+    },
+    {
+        "draw_id": 202,
+        "date": "2026-03-08",
+        "numbers": [3, 11, 19, 26, 38, 42],
+        "bonus": 7
+    },
+    {
+        "draw_id": 203,
+        "date": "2026-03-15",
+        "numbers": [5, 16, 21, 30, 41, 49],
+        "bonus": 9
+    }
+]
 
-URL = "https://smok95.github.io/lotto/results/all.json"
+def create_json_file(file_path):
+    """목데이터를 JSON 파일로 생성"""
+    try:
+        with open(file_path, 'w', encoding='utf-8') as f:
+            json.dump(MOCK_DATA, f, ensure_ascii=False, indent=4)
+        print(f"📄 '{file_path}' 파일이 생성되었습니다.")
+    except Exception as e:
+        print(f"❌ JSON 파일 생성 오류: {e}")
 
+def load_json_file(file_path):
+    """JSON 파일을 읽어 리스트 반환"""
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"File not found: {file_path}")
+
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Invalid JSON format: {e}")
+    except Exception as e:
+        raise RuntimeError(f"Error reading file: {e}")
+
+    if not isinstance(data, list):
+        raise TypeError("Expected JSON content to be a list of draws.")
+
+    return data
+
+def filter_by_date(data, target_date):
+    """날짜로 필터"""
+    return [draw for draw in data if draw.get("date") == target_date]
+
+def filter_by_number(data, target_number):
+    """번호로 필터"""
+    return [draw for draw in data if target_number in draw.get("numbers", [])]
+
+def display_results(results, query_type, query_value):
+    """검색 결과 출력"""
+    if not results:
+        print(f"⚠ 검색 결과 없음 — {query_type}: {query_value}\n")
+        return
+    print(f"🔍 검색 결과 — {query_type}: {query_value}")
+    for draw in results:
+        print(f"  Draw #{draw['draw_id']} | Date: {draw['date']} | Numbers: {', '.join(map(str, draw['numbers']))} | Bonus: {draw['bonus']}")
+    print()
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--out", default="lotto_analysis", help="output directory")
-    args = parser.parse_args()
-    out = Path(args.out)
-    out.mkdir(parents=True, exist_ok=True)
+    file_path = "all_draws.json"
 
-    response = requests.get(URL, timeout=60)
-    response.raise_for_status()
-    raw = response.json()
-    if not isinstance(raw, list) or not raw:
-        raise ValueError("Expected a non-empty JSON list")
+    # JSON 파일이 없으면 자동 생성
+    if not os.path.exists(file_path):
+        create_json_file(file_path)
 
-    draws = sorted(raw, key=lambda d: int(d["draw_no"]))
-    draw_ids = [int(d["draw_no"]) for d in draws]
-    expected = list(range(draw_ids[0], draw_ids[-1] + 1))
-    if draw_ids != expected:
-        missing = sorted(set(expected) - set(draw_ids))
-        raise ValueError(f"Draw sequence has gaps; missing draw numbers: {missing[:30]}")
+    try:
+        data = load_json_file(file_path)
+        print(f"✅ {len(data)}개의 추첨 기록을 불러왔습니다.\n")
 
-    freq = collections.Counter()
-    bonus_freq = collections.Counter()
-    for draw in draws:
-        nums = [int(n) for n in draw["numbers"]]
-        if len(nums) != 6 or len(set(nums)) != 6 or not all(1 <= n <= 45 for n in nums):
-            raise ValueError(f"Invalid main numbers in draw {draw['draw_no']}: {nums}")
-        freq.update(nums)
-        bonus = draw.get("bonus_no")
-        if bonus is not None:
-            bonus_freq[int(bonus)] += 1
+        choice = input("검색 방법 선택 — (1) 날짜 / (2) 번호 : ").strip()
+        if choice == "1":
+            date_query = input("날짜 입력 (YYYY-MM-DD): ").strip()
+            results = filter_by_date(data, date_query)
+            display_results(results, "날짜", date_query)
+        elif choice == "2":
+            try:
+                number_query = int(input("번호 입력: ").strip())
+            except ValueError:
+                print("❌ 잘못된 번호 입력.")
+                return
+            results = filter_by_number(data, number_query)
+            display_results(results, "번호", number_query)
+        else:
+            print("❌ 잘못된 선택입니다. 1 또는 2를 입력하세요.")
 
-    latest = draws[-1]
-    total_main_numbers = len(draws) * 6
-    expected_freq = len(draws) * 6 / 45
-    rows = []
-    for n in range(1, 46):
-        rows.append({
-            "number": n,
-            "main_number_hits": freq[n],
-            "hit_rate_percent": round(freq[n] / len(draws) * 100, 3),
-            "bonus_hits_separate": bonus_freq[n],
-        })
-
-    # Pick six highest-frequency numbers, tie-break by lower number.
-    # This is a descriptive frequency pick, not a claim of higher future odds.
-    top6 = sorted(sorted(range(1, 46), key=lambda n: (-freq[n], n))[:6])
-
-    # Recent 100-draw frequency as a separate descriptive view.
-    recent = draws[-min(100, len(draws)):]
-    recent_freq = collections.Counter(
-        n for d in recent for n in map(int, d["numbers"])
-    )
-    recent_top6 = sorted(sorted(range(1, 46), key=lambda n: (-recent_freq[n], n))[:6])
-
-    # Pair frequencies over all historical draws.
-    pair_freq = collections.Counter()
-    for d in draws:
-        nums = sorted(map(int, d["numbers"]))
-        for i in range(6):
-            for j in range(i + 1, 6):
-                pair_freq[(nums[i], nums[j])] += 1
-
-    # Verify all main-number appearances total exactly 6 per draw.
-    assert sum(freq.values()) == total_main_numbers
-
-    csv_path = out / "number_frequencies.csv"
-    with csv_path.open("w", encoding="utf-8-sig", newline="") as f:
-        import csv
-        writer = csv.DictWriter(f, fieldnames=rows[0].keys())
-        writer.writeheader()
-        writer.writerows(rows)
-
-    draws_path = out / "all_draws.json"
-    draws_path.write_text(json.dumps(draws, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    report = []
-    report.append(f"Draws analyzed: {len(draws)} (draw {draw_ids[0]}–{draw_ids[-1]})")
-    report.append(f"Latest draw date: {latest.get('date', 'unknown')}")
-    report.append(f"Main-number observations: {total_main_numbers}")
-    report.append(f"Expected frequency per number under a fair draw: {expected_freq:.2f}")
-    report.append("")
-    report.append("ALL-TIME TOP 15 (bonus excluded):")
-    for n in sorted(range(1, 46), key=lambda n: (-freq[n], n))[:15]:
-        report.append(f"  {n:2d}: {freq[n]} hits ({freq[n] / len(draws) * 100:.2f}% of draws)")
-    report.append("")
-    report.append(f"Frequency-based six-number candidate: {top6}")
-    report.append(f"Recent-{len(recent)}-draw frequency candidate: {recent_top6}")
-    report.append("")
-    report.append("TOP 15 NUMBER PAIRS:")
-    for (a, b), count in pair_freq.most_common(15):
-        report.append(f"  {a:2d}-{b:2d}: {count}")
-    report.append("")
-    report.append("Interpretation: historical frequencies describe past draws only.")
-    report.append("Every distinct 6-number combination still has the same first-prize odds.")
-    report_text = "\n".join(report) + "\n"
-    (out / "report.txt").write_text(report_text, encoding="utf-8")
-    print(report_text)
-    print(f"Saved: {csv_path}")
-    print(f"Saved: {draws_path}")
-    print(f"Saved: {out / 'report.txt'}")
-
+    except Exception as e:
+        print(f"❌ 오류: {e}")
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        raise
+    main()
